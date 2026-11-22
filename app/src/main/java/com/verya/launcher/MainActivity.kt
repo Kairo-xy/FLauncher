@@ -26,17 +26,19 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.core.app.NotificationManagerCompat
 import com.verya.launcher.data.AppsManager
 import com.verya.launcher.data.NotesManager
+import com.verya.launcher.data.NotificationStore
 import com.verya.launcher.model.AppItem
 import com.verya.launcher.model.TermLine
 import com.verya.launcher.model.WindowState
@@ -55,25 +57,42 @@ import com.verya.launcher.ui.windows.SystemSettingsContent
 import com.verya.launcher.ui.windows.TerminalContent
 import com.verya.launcher.ui.windows.WallpaperTheme
 import com.verya.launcher.ui.windows.WeatherContent
-import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
 class MainActivity : ComponentActivity() {
 
+    // Bumped every time the launcher comes back to the front so the app list
+    // picks up installs and uninstalls.
+    private var resumeTick by mutableIntStateOf(0)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         setContent {
-            DesktopWorkspace(context = this)
+            DesktopWorkspace(context = this, refreshKey = resumeTick)
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        resumeTick++
+    }
+}
+
+private fun normalizeUrl(input: String): String {
+    val t = input.trim()
+    return when {
+        t.isEmpty() -> "https://duckduckgo.com"
+        t.startsWith("http://") || t.startsWith("https://") -> t
+        t.contains(".") && !t.contains(" ") -> "https://$t"
+        else -> "https://duckduckgo.com/?q=" + Uri.encode(t)
     }
 }
 
 @Composable
-fun DesktopWorkspace(context: Context) {
-    val scope = rememberCoroutineScope()
+fun DesktopWorkspace(context: Context, refreshKey: Int = 0) {
     val appsManager = remember { AppsManager(context) }
     val notesManager = remember { NotesManager(context) }
 
@@ -81,6 +100,10 @@ fun DesktopWorkspace(context: Context) {
     val terminalLines = remember { mutableStateListOf<TermLine>() }
     var commandInput by remember { mutableStateOf("") }
     var wallpaperTheme by remember { mutableStateOf(WallpaperTheme.NEON_GRID) }
+
+    // Browser navigation requests coming from terminal commands
+    var browserUrl by remember { mutableStateOf<String?>(null) }
+    var browserNonce by remember { mutableIntStateOf(0) }
 
     // Floating window state definitions
     val terminalWin = remember {
@@ -139,12 +162,37 @@ fun DesktopWorkspace(context: Context) {
         terminalLines.add(TermLine(text, kind))
     }
 
-    // Load initial apps & welcome message
-    LaunchedEffect(Unit) {
-        scope.launch {
-            installedApps = appsManager.loadApps()
+    fun findApp(query: String): AppItem? {
+        val q = query.trim().lowercase()
+        if (q.isEmpty()) return null
+        return installedApps.firstOrNull { it.label.lowercase() == q }
+            ?: installedApps.firstOrNull { it.label.lowercase().startsWith(q) }
+            ?: installedApps.firstOrNull { it.label.lowercase().contains(q) }
+    }
+
+    fun startSafe(intent: Intent): Boolean = try {
+        context.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        true
+    } catch (e: Exception) {
+        false
+    }
+
+    fun openBrowser(url: String?) {
+        if (url != null) {
+            browserUrl = url
+            browserNonce += 1
         }
-        out("FLauncher Desktop OS [Version 2.0.0-cyber]", 4)
+        bringToFront(browserWin)
+    }
+
+    // Reload the app list on first start and every time the launcher resumes
+    LaunchedEffect(refreshKey) {
+        installedApps = appsManager.loadApps()
+    }
+
+    // Welcome message
+    LaunchedEffect(Unit) {
+        out("FLauncher Desktop OS [Version 2.1.0-cyber]", 4)
         out("Kernel Linux / Android ARM64 Desktop Shell", 4)
         out("Type 'help' for commands, or tap the dock icons below.", 3)
     }
@@ -164,12 +212,19 @@ fun DesktopWorkspace(context: Context) {
                 out("  terminal           bring terminal to front")
                 out("  apps               open application drawer")
                 out("  open <app>         launch installed application")
-                out("  browser [url]      open web browser")
+                out("  info <app>         open system info page for an app")
+                out("  remove <app>       uninstall an app")
+                out("  browser [url]      open web browser (optionally at url)")
                 out("  search <query>     web search in browser")
                 out("  weather [city]     open atmosphere weather")
                 out("  maps / map <dest>  open cyber map")
                 out("  notes / note <msg> open notes or quick save")
                 out("  files              open storage file explorer")
+                out("  call [number]      open the phone dialer")
+                out("  notif              show recent notifications")
+                out("  theme [name]       list or change desktop theme")
+                out("  wallpaper          pick a system wallpaper")
+                out("  home               choose default home app")
                 out("  settings           desktop system settings")
                 out("  battery            battery level and stats")
                 out("  time               system time & date")
@@ -183,12 +238,16 @@ fun DesktopWorkspace(context: Context) {
                 out("Opened App Drawer with ${installedApps.size} apps", 3)
             }
             "browser" -> {
-                bringToFront(browserWin)
+                openBrowser(if (arg.isBlank()) null else normalizeUrl(arg))
                 out("Opened Cyber Browser", 3)
             }
             "search" -> {
-                bringToFront(browserWin)
-                out("Searching: '$arg'", 3)
+                if (arg.isBlank()) {
+                    out("Usage: search <query>", 2)
+                } else {
+                    openBrowser("https://duckduckgo.com/?q=" + Uri.encode(arg))
+                    out("Searching: '$arg'", 3)
+                }
             }
             "weather" -> {
                 bringToFront(weatherWin)
@@ -219,6 +278,50 @@ fun DesktopWorkspace(context: Context) {
                 bringToFront(settingsWin)
                 out("Opened Desktop Settings", 3)
             }
+            "call" -> {
+                val ok = startSafe(Intent(Intent.ACTION_DIAL, Uri.parse("tel:" + Uri.encode(arg))))
+                if (ok) out("Opening dialer", 3) else out("No dialer app available", 2)
+            }
+            "wallpaper" -> {
+                val picker = Intent.createChooser(Intent(Intent.ACTION_SET_WALLPAPER), "Wallpaper")
+                if (!startSafe(picker)) out("No wallpaper picker available", 2)
+                else out("Pick a wallpaper, then choose the 'system wallpaper' theme in settings.", 3)
+            }
+            "home" -> {
+                if (!startSafe(Intent(Settings.ACTION_HOME_SETTINGS))) out("Could not open home settings", 2)
+            }
+            "theme" -> {
+                if (arg.isBlank()) {
+                    out("Themes: " + WallpaperTheme.entries.joinToString(", ") { it.name.lowercase() })
+                    out("Usage: theme <name>", 3)
+                } else {
+                    val q = arg.lowercase().replace(' ', '_')
+                    val match = WallpaperTheme.entries.firstOrNull { it.name.lowercase().contains(q) }
+                    if (match != null) {
+                        wallpaperTheme = match
+                        out("Theme set: ${match.name.lowercase()}", 3)
+                    } else {
+                        out("Unknown theme: $arg", 2)
+                    }
+                }
+            }
+            "notif", "notifications" -> {
+                val enabled = NotificationManagerCompat.getEnabledListenerPackages(context)
+                    .contains(context.packageName)
+                if (!enabled) {
+                    out("Notification access is off. Enable FLauncher in the list, then run 'notif' again.", 2)
+                    startSafe(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
+                } else {
+                    val items = NotificationStore.items
+                    if (items.isEmpty()) {
+                        out("No notifications.", 3)
+                    } else {
+                        items.take(8).forEach { n ->
+                            out("[${n.app}] ${n.title} ${n.text}".trim())
+                        }
+                    }
+                }
+            }
             "time" -> {
                 val fmt = SimpleDateFormat("EEEE, d MMMM yyyy HH:mm:ss", Locale.getDefault())
                 out(fmt.format(Date()), 3)
@@ -235,15 +338,29 @@ fun DesktopWorkspace(context: Context) {
                 out("System Uptime: ${hrs}h ${mins}m", 3)
             }
             "open" -> {
-                val q = arg.lowercase()
-                val match = installedApps.firstOrNull { it.label.lowercase() == q }
-                    ?: installedApps.firstOrNull { it.label.lowercase().startsWith(q) }
-                    ?: installedApps.firstOrNull { it.label.lowercase().contains(q) }
-
+                val match = findApp(arg)
                 if (match != null) {
                     val launched = appsManager.launchApp(match.packageName)
                     if (launched) out("Launched ${match.label}", 3)
                     else out("Failed to launch ${match.label}", 2)
+                } else {
+                    out("No installed app found matching '$arg'", 2)
+                }
+            }
+            "info" -> {
+                val match = findApp(arg)
+                if (match != null) {
+                    appsManager.openAppInfo(match.packageName)
+                    out("Opened info for ${match.label}", 3)
+                } else {
+                    out("No installed app found matching '$arg'", 2)
+                }
+            }
+            "remove", "uninstall" -> {
+                val match = findApp(arg)
+                if (match != null) {
+                    appsManager.uninstallApp(match.packageName)
+                    out("Uninstall prompt for ${match.label}", 3)
                 } else {
                     out("No installed app found matching '$arg'", 2)
                 }
@@ -387,7 +504,10 @@ fun DesktopWorkspace(context: Context) {
                     onFocus = { bringToFront(browserWin) },
                     onClose = { browserWin.isVisible.value = false }
                 ) {
-                    BrowserContent()
+                    BrowserContent(
+                        navigateTo = browserUrl,
+                        navigateNonce = browserNonce
+                    )
                 }
 
                 // Floating Window 3: Atmosphere Weather
