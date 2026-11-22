@@ -5,366 +5,488 @@ import android.content.Intent
 import android.net.Uri
 import android.os.BatteryManager
 import android.os.Bundle
+import android.os.SystemClock
 import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.imePadding
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.systemBarsPadding
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.foundation.text.KeyboardActions
-import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material3.Text
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.input.ImeAction
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
-import kotlinx.coroutines.delay
+import com.verya.launcher.data.AppsManager
+import com.verya.launcher.data.NotesManager
+import com.verya.launcher.model.AppItem
+import com.verya.launcher.model.TermLine
+import com.verya.launcher.model.WindowState
+import com.verya.launcher.model.WindowType
+import com.verya.launcher.theme.CyberColors
+import com.verya.launcher.ui.CommandBar
+import com.verya.launcher.ui.QuickDock
+import com.verya.launcher.ui.StatusBar
+import com.verya.launcher.ui.WindowFrame
+import com.verya.launcher.ui.windows.AppsDrawerContent
+import com.verya.launcher.ui.windows.BrowserContent
+import com.verya.launcher.ui.windows.FilesContent
+import com.verya.launcher.ui.windows.MapContent
+import com.verya.launcher.ui.windows.NotesContent
+import com.verya.launcher.ui.windows.SystemSettingsContent
+import com.verya.launcher.ui.windows.TerminalContent
+import com.verya.launcher.ui.windows.WallpaperTheme
+import com.verya.launcher.ui.windows.WeatherContent
+import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-data class App(val label: String, val pkg: String)
+class MainActivity : ComponentActivity() {
 
-/** kind: 0 = output, 1 = input echo, 2 = error, 3 = accent */
-data class Line(val text: String, val kind: Int)
-
-class Term(private val ctx: Context) {
-    val lines = mutableStateListOf<Line>()
-    var apps by mutableStateOf(emptyList<App>())
-    private val prefs = ctx.getSharedPreferences("verya", Context.MODE_PRIVATE)
-
-    init {
-        out("Verya Launcher v0.1.0", 3)
-        out("type 'help' for commands, or just an app name")
-    }
-
-    fun out(s: String, kind: Int = 0) {
-        lines.add(Line(s, kind))
-    }
-
-    fun loadApps() {
-        val pm = ctx.packageManager
-        val i = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
-        apps = pm.queryIntentActivities(i, 0)
-            .map { App(it.loadLabel(pm).toString(), it.activityInfo.packageName) }
-            .filter { it.pkg != ctx.packageName }
-            .distinctBy { it.pkg }
-            .sortedBy { it.label.lowercase() }
-    }
-
-    fun battery(): Int {
-        val bm = ctx.getSystemService(Context.BATTERY_SERVICE) as BatteryManager
-        return bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
-    }
-
-    fun find(q: String): App? {
-        val s = q.trim().lowercase()
-        if (s.isEmpty()) return null
-        return apps.firstOrNull { it.label.lowercase() == s }
-            ?: apps.firstOrNull { it.label.lowercase().startsWith(s) }
-            ?: apps.firstOrNull { it.label.lowercase().contains(s) }
-    }
-
-    fun launch(app: App) {
-        val intent = ctx.packageManager.getLaunchIntentForPackage(app.pkg)
-        if (intent == null) {
-            out("cannot launch ${app.label}", 2)
-            return
-        }
-        start(intent)
-    }
-
-    private fun start(i: Intent) {
-        i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        try {
-            ctx.startActivity(i)
-        } catch (e: Exception) {
-            out("failed: ${e.message}", 2)
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
+        setContent {
+            DesktopWorkspace(context = this)
         }
     }
+}
 
-    private fun notes(): List<String> =
-        prefs.getString("notes", "")!!.split("\n").filter { it.isNotBlank() }
+@Composable
+fun DesktopWorkspace(context: Context) {
+    val scope = rememberCoroutineScope()
+    val appsManager = remember { AppsManager(context) }
+    val notesManager = remember { NotesManager(context) }
 
-    fun run(raw: String) {
+    var installedApps by remember { mutableStateOf(emptyList<AppItem>()) }
+    val terminalLines = remember { mutableStateListOf<TermLine>() }
+    var commandInput by remember { mutableStateOf("") }
+    var wallpaperTheme by remember { mutableStateOf(WallpaperTheme.NEON_GRID) }
+
+    // Floating window state definitions
+    val terminalWin = remember {
+        WindowState(WindowType.TERMINAL, initX = 14f, initY = 38f, initWidth = 320f, initHeight = 240f, initZ = 2f, initVisible = true)
+    }
+    val browserWin = remember {
+        WindowState(WindowType.BROWSER, initX = 24f, initY = 50f, initWidth = 330f, initHeight = 360f, initZ = 1f, initVisible = false)
+    }
+    val weatherWin = remember {
+        WindowState(WindowType.WEATHER, initX = 30f, initY = 60f, initWidth = 310f, initHeight = 320f, initZ = 1f, initVisible = false)
+    }
+    val mapsWin = remember {
+        WindowState(WindowType.MAPS, initX = 20f, initY = 45f, initWidth = 320f, initHeight = 340f, initZ = 1f, initVisible = false)
+    }
+    val notesWin = remember {
+        WindowState(WindowType.NOTES, initX = 25f, initY = 55f, initWidth = 310f, initHeight = 300f, initZ = 1f, initVisible = false)
+    }
+    val filesWin = remember {
+        WindowState(WindowType.FILES, initX = 20f, initY = 50f, initWidth = 310f, initHeight = 290f, initZ = 1f, initVisible = false)
+    }
+    val appsWin = remember {
+        WindowState(WindowType.APPS, initX = 16f, initY = 42f, initWidth = 330f, initHeight = 340f, initZ = 1f, initVisible = false)
+    }
+    val settingsWin = remember {
+        WindowState(WindowType.SETTINGS, initX = 22f, initY = 48f, initWidth = 320f, initHeight = 320f, initZ = 1f, initVisible = false)
+    }
+
+    val windows = remember {
+        listOf(terminalWin, browserWin, weatherWin, mapsWin, notesWin, filesWin, appsWin, settingsWin)
+    }
+
+    var topZIndex by remember { mutableFloatStateOf(3f) }
+    var focusedWindow by remember { mutableStateOf<WindowState?>(terminalWin) }
+
+    fun bringToFront(win: WindowState) {
+        topZIndex += 1f
+        win.zIndex.floatValue = topZIndex
+        win.isMinimized.value = false
+        win.isVisible.value = true
+        focusedWindow = win
+    }
+
+    fun toggleWindow(type: WindowType) {
+        val win = windows.first { it.type == type }
+        if (win.isVisible.value && !win.isMinimized.value && focusedWindow == win) {
+            // Already active and on top -> minimize
+            win.isMinimized.value = true
+            focusedWindow = windows.filter { it.isVisible.value && !it.isMinimized.value }
+                .maxByOrNull { it.zIndex.floatValue }
+        } else {
+            bringToFront(win)
+        }
+    }
+
+    fun out(text: String, kind: Int = 0) {
+        terminalLines.add(TermLine(text, kind))
+    }
+
+    // Load initial apps & welcome message
+    LaunchedEffect(Unit) {
+        scope.launch {
+            installedApps = appsManager.loadApps()
+        }
+        out("FLauncher Desktop OS [Version 2.0.0-cyber]", 4)
+        out("Kernel Linux / Android ARM64 Desktop Shell", 4)
+        out("Type 'help' for commands, or tap the dock icons below.", 3)
+    }
+
+    fun executeCommand(raw: String) {
         val cmd = raw.trim()
         if (cmd.isEmpty()) return
-        out("\u276F $cmd", 1)
+        out("root@flauncher # $cmd", 1)
+
         val parts = cmd.split(" ", limit = 2)
         val head = parts[0].lowercase()
         val arg = parts.getOrNull(1)?.trim().orEmpty()
 
         when (head) {
             "help" -> {
-                out("apps               list installed apps")
-                out("open <name>        launch an app")
-                out("call [number]      open the dialer")
-                out("search <text>      web search")
-                out("files              open file manager")
-                out("settings           system settings")
-                out("info <app>         app info page")
-                out("uninstall <app>    remove an app")
-                out("note <text>        save a note")
-                out("notes [clear]      show / clear notes")
-                out("time | battery     status")
-                out("clear              clear the screen")
+                out("Available Desktop Commands:")
+                out("  terminal           bring terminal to front")
+                out("  apps               open application drawer")
+                out("  open <app>         launch installed application")
+                out("  browser [url]      open web browser")
+                out("  search <query>     web search in browser")
+                out("  weather [city]     open atmosphere weather")
+                out("  maps / map <dest>  open cyber map")
+                out("  notes / note <msg> open notes or quick save")
+                out("  files              open storage file explorer")
+                out("  settings           desktop system settings")
+                out("  battery            battery level and stats")
+                out("  time               system time & date")
+                out("  uptime             device uptime")
+                out("  clear              clear terminal screen")
             }
-            "clear" -> lines.clear()
-            "apps" -> if (apps.isEmpty()) out("no apps found", 2)
-            else out(apps.joinToString("  ") { it.label })
-            "open" -> {
-                val a = find(arg)
-                if (a != null) launch(a) else out("no app matches '$arg'", 2)
+            "clear" -> terminalLines.clear()
+            "terminal" -> bringToFront(terminalWin)
+            "apps" -> {
+                bringToFront(appsWin)
+                out("Opened App Drawer with ${installedApps.size} apps", 3)
             }
-            "call" -> start(
-                Intent(Intent.ACTION_DIAL, Uri.parse("tel:" + Uri.encode(arg)))
-            )
-            "search" -> start(
-                Intent(
-                    Intent.ACTION_VIEW,
-                    Uri.parse("https://www.google.com/search?q=" + Uri.encode(arg))
-                )
-            )
-            "settings" -> start(Intent(Settings.ACTION_SETTINGS))
-            "files" -> {
-                val a = find("files")
-                if (a != null) launch(a) else out("no files app found", 2)
+            "browser" -> {
+                bringToFront(browserWin)
+                out("Opened Cyber Browser", 3)
             }
-            "info" -> {
-                val a = find(arg)
-                if (a != null) start(
-                    Intent(
-                        Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-                        Uri.parse("package:" + a.pkg)
-                    )
-                ) else out("no app matches '$arg'", 2)
+            "search" -> {
+                bringToFront(browserWin)
+                out("Searching: '$arg'", 3)
             }
-            "uninstall" -> {
-                val a = find(arg)
-                if (a != null) start(
-                    Intent(Intent.ACTION_DELETE, Uri.parse("package:" + a.pkg))
-                ) else out("no app matches '$arg'", 2)
+            "weather" -> {
+                bringToFront(weatherWin)
+                out("Opened Atmosphere Weather", 3)
             }
-            "note" -> {
-                if (arg.isEmpty()) {
-                    out("usage: note <text>", 2)
-                } else {
-                    prefs.edit().putString("notes", (notes() + arg).joinToString("\n")).apply()
-                    out("saved", 3)
-                }
+            "maps", "map" -> {
+                bringToFront(mapsWin)
+                out("Opened Cyber Map", 3)
             }
             "notes" -> {
-                if (arg == "clear") {
-                    prefs.edit().remove("notes").apply()
-                    out("notes cleared", 3)
+                bringToFront(notesWin)
+                out("Opened Quick Notes", 3)
+            }
+            "note" -> {
+                if (arg.isBlank()) {
+                    out("Usage: note <text to save>", 2)
                 } else {
-                    val n = notes()
-                    if (n.isEmpty()) out("no notes yet") else n.forEachIndexed { i, s -> out("${i + 1}. $s") }
+                    notesManager.saveNote("Quick Note", arg)
+                    bringToFront(notesWin)
+                    out("Note saved successfully.", 3)
                 }
             }
-            "time" -> out(SimpleDateFormat("EEE d MMM yyyy  HH:mm", Locale.getDefault()).format(Date()))
-            "battery" -> out("battery: ${battery()}%")
+            "files" -> {
+                bringToFront(filesWin)
+                out("Opened Storage Files", 3)
+            }
+            "settings" -> {
+                bringToFront(settingsWin)
+                out("Opened Desktop Settings", 3)
+            }
+            "time" -> {
+                val fmt = SimpleDateFormat("EEEE, d MMMM yyyy HH:mm:ss", Locale.getDefault())
+                out(fmt.format(Date()), 3)
+            }
+            "battery" -> {
+                val bm = context.getSystemService(Context.BATTERY_SERVICE) as? BatteryManager
+                val bat = bm?.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY) ?: 100
+                out("Battery Level: $bat%", 3)
+            }
+            "uptime" -> {
+                val ms = SystemClock.uptimeMillis()
+                val hrs = ms / (1000 * 60 * 60)
+                val mins = (ms / (1000 * 60)) % 60
+                out("System Uptime: ${hrs}h ${mins}m", 3)
+            }
+            "open" -> {
+                val q = arg.lowercase()
+                val match = installedApps.firstOrNull { it.label.lowercase() == q }
+                    ?: installedApps.firstOrNull { it.label.lowercase().startsWith(q) }
+                    ?: installedApps.firstOrNull { it.label.lowercase().contains(q) }
+
+                if (match != null) {
+                    val launched = appsManager.launchApp(match.packageName)
+                    if (launched) out("Launched ${match.label}", 3)
+                    else out("Failed to launch ${match.label}", 2)
+                } else {
+                    out("No installed app found matching '$arg'", 2)
+                }
+            }
             else -> {
-                val a = find(cmd)
-                if (a != null) launch(a) else out("command not found: $head", 2)
+                // Try fuzzy launch app directly if typed as single word
+                val match = installedApps.firstOrNull { it.label.lowercase() == head }
+                    ?: installedApps.firstOrNull { it.label.lowercase().startsWith(head) }
+
+                if (match != null) {
+                    appsManager.launchApp(match.packageName)
+                    out("Launched ${match.label}", 3)
+                } else {
+                    out("Command not found: $head (type 'help' for commands)", 2)
+                }
             }
         }
     }
-}
 
-class MainActivity : ComponentActivity() {
-    private lateinit var term: Term
-
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
-        term = Term(applicationContext)
-        term.loadApps()
-        setContent { Screen(term) }
-    }
-
-    override fun onResume() {
-        super.onResume()
-        term.loadApps()
-    }
-}
-
-private val Fg = Color(0xFFC0CAF5)
-private val Dim = Color(0xFF7A88B8)
-private val Prompt = Color(0xFFBB9AF7)
-private val Accent = Color(0xFF9ECE6A)
-private val Err = Color(0xFFF7768E)
-private val Scrim = Color(0x88000000)
-private val Mono = FontFamily.Monospace
-
-@Composable
-fun Screen(t: Term) {
-    var input by remember { mutableStateOf("") }
-    val listState = rememberLazyListState()
-    val status by produceState("") {
-        val fmt = SimpleDateFormat("HH:mm", Locale.getDefault())
-        while (true) {
-            value = "${t.battery()}%  ${fmt.format(Date())}"
-            delay(1000)
-        }
-    }
-    LaunchedEffect(t.lines.size) {
-        if (t.lines.isNotEmpty()) listState.animateScrollToItem(t.lines.lastIndex)
-    }
-    val suggestions = remember(input, t.apps) {
-        val q = input.trim().lowercase().removePrefix("open ").trim()
-        if (q.isEmpty()) emptyList() else t.apps.filter { it.label.lowercase().contains(q) }.take(8)
-    }
-
-    Column(
-        Modifier
+    BoxWithConstraints(
+        modifier = Modifier
             .fillMaxSize()
-            .systemBarsPadding()
+            .statusBarsPadding()
+            .navigationBarsPadding()
             .imePadding()
-            .padding(horizontal = 10.dp)
     ) {
-        Row(
-            Modifier
-                .fillMaxWidth()
-                .background(Scrim)
-                .padding(horizontal = 8.dp, vertical = 4.dp),
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Text("root@verya:~", color = Fg, fontFamily = Mono, fontSize = 12.sp)
-            Text(status, color = Dim, fontFamily = Mono, fontSize = 12.sp)
-        }
+        val screenW = maxWidth.value
+        val screenH = maxHeight.value
 
-        Row(Modifier.weight(1f).padding(top = 6.dp)) {
-            LazyColumn(
-                Modifier
-                    .weight(1f)
-                    .fillMaxSize()
-                    .background(Scrim)
-                    .padding(8.dp),
-                state = listState
-            ) {
-                items(t.lines) { l ->
-                    Text(
-                        l.text,
-                        color = when (l.kind) {
-                            1 -> Prompt
-                            2 -> Err
-                            3 -> Accent
-                            else -> Fg
-                        },
-                        fontFamily = Mono,
-                        fontSize = 13.sp
-                    )
-                }
+        // Cyberpunk Desktop Wallpaper Background
+        when (wallpaperTheme) {
+            WallpaperTheme.SYSTEM_WALLPAPER -> {
+                Box(modifier = Modifier.fillMaxSize().background(Color(0x33000000)))
             }
-            Column(
-                Modifier.padding(start = 8.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp, Alignment.Bottom),
-                horizontalAlignment = Alignment.End
-            ) {
-                listOf("apps", "notes", "call", "files", "settings", "clear", "help").forEach { c ->
-                    Text(
-                        c,
-                        color = Fg,
-                        fontFamily = Mono,
-                        fontSize = 12.sp,
-                        modifier = Modifier
-                            .background(Scrim, RoundedCornerShape(4.dp))
-                            .border(1.dp, Dim, RoundedCornerShape(4.dp))
-                            .clickable { t.run(c) }
-                            .padding(horizontal = 10.dp, vertical = 6.dp)
-                    )
-                }
+            WallpaperTheme.DARK_AURORA -> {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(
+                            Brush.radialGradient(
+                                colors = listOf(Color(0xFF1F1D36), Color(0xFF10121E), CyberColors.BgDark),
+                                center = Offset(300f, 400f),
+                                radius = 900f
+                            )
+                        )
+                )
             }
-        }
+            WallpaperTheme.DEEP_MATRIX -> {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(
+                            Brush.verticalGradient(
+                                colors = listOf(Color(0xFF07120C), Color(0xFF091710), CyberColors.BgDark)
+                            )
+                        )
+                )
+            }
+            WallpaperTheme.CHARCOAL_GLASS -> {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(
+                            Brush.linearGradient(
+                                colors = listOf(Color(0xFF141620), Color(0xFF0D0E15), Color(0xFF171A27))
+                            )
+                        )
+                )
+            }
+            WallpaperTheme.NEON_GRID -> {
+                Box(modifier = Modifier.fillMaxSize().background(CyberColors.BgDark)) {
+                    Canvas(modifier = Modifier.fillMaxSize()) {
+                        val gridSpacing = 40f
+                        val w = size.width
+                        val h = size.height
 
-        if (suggestions.isNotEmpty()) {
-            LazyRow(
-                Modifier.padding(top = 6.dp),
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                items(suggestions) { a ->
-                    Text(
-                        a.label,
-                        color = Accent,
-                        fontFamily = Mono,
-                        fontSize = 12.sp,
-                        modifier = Modifier
-                            .background(Scrim, RoundedCornerShape(12.dp))
-                            .border(1.dp, Accent, RoundedCornerShape(12.dp))
-                            .clickable {
-                                t.launch(a)
-                                input = ""
-                            }
-                            .padding(horizontal = 10.dp, vertical = 5.dp)
-                    )
-                }
-            }
-        }
-
-        Row(
-            Modifier
-                .fillMaxWidth()
-                .padding(vertical = 8.dp)
-                .background(Scrim, RoundedCornerShape(6.dp))
-                .padding(horizontal = 10.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text("\u276F ", color = Prompt, fontFamily = Mono, fontSize = 14.sp)
-            BasicTextField(
-                value = input,
-                onValueChange = { input = it },
-                singleLine = true,
-                textStyle = TextStyle(color = Fg, fontFamily = Mono, fontSize = 14.sp),
-                cursorBrush = SolidColor(Accent),
-                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
-                keyboardActions = KeyboardActions(onGo = {
-                    t.run(input)
-                    input = ""
-                }),
-                modifier = Modifier.weight(1f),
-                decorationBox = { inner ->
-                    Box {
-                        if (input.isEmpty()) {
-                            Text(
-                                "type a command or app name...",
-                                color = Dim,
-                                fontFamily = Mono,
-                                fontSize = 14.sp
+                        // Draw subtle cyber grid
+                        for (x in 0..(w / gridSpacing).toInt()) {
+                            drawLine(
+                                color = Color(0x0C7AA2F7),
+                                start = Offset(x * gridSpacing, 0f),
+                                end = Offset(x * gridSpacing, h),
+                                strokeWidth = 1f
                             )
                         }
-                        inner()
+                        for (y in 0..(h / gridSpacing).toInt()) {
+                            drawLine(
+                                color = Color(0x0C7AA2F7),
+                                start = Offset(0f, y * gridSpacing),
+                                end = Offset(w, y * gridSpacing),
+                                strokeWidth = 1f
+                            )
+                        }
                     }
                 }
+            }
+        }
+
+        // Layout Root: Status Bar + Desktop Workspace Area + Quick Dock + Command Bar
+        Column(modifier = Modifier.fillMaxSize()) {
+            // Top Status Bar
+            StatusBar(
+                activeContextName = focusedWindow?.type?.name,
+                modifier = Modifier.fillMaxWidth()
+            )
+
+            // Central Desktop Workspace where floating windows live
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null
+                    ) {
+                        // Desktop tap unfocuses windows
+                        focusedWindow = null
+                    }
+            ) {
+                // Floating Window 1: Terminal
+                WindowFrame(
+                    state = terminalWin,
+                    isFocused = focusedWindow == terminalWin,
+                    screenWidthDp = screenW,
+                    screenHeightDp = screenH,
+                    onFocus = { bringToFront(terminalWin) },
+                    onClose = { terminalWin.isVisible.value = false }
+                ) {
+                    TerminalContent(
+                        lines = terminalLines,
+                        onCommand = { executeCommand(it) }
+                    )
+                }
+
+                // Floating Window 2: Cyber Browser
+                WindowFrame(
+                    state = browserWin,
+                    isFocused = focusedWindow == browserWin,
+                    screenWidthDp = screenW,
+                    screenHeightDp = screenH,
+                    onFocus = { bringToFront(browserWin) },
+                    onClose = { browserWin.isVisible.value = false }
+                ) {
+                    BrowserContent()
+                }
+
+                // Floating Window 3: Atmosphere Weather
+                WindowFrame(
+                    state = weatherWin,
+                    isFocused = focusedWindow == weatherWin,
+                    screenWidthDp = screenW,
+                    screenHeightDp = screenH,
+                    onFocus = { bringToFront(weatherWin) },
+                    onClose = { weatherWin.isVisible.value = false }
+                ) {
+                    WeatherContent()
+                }
+
+                // Floating Window 4: Cyber Map
+                WindowFrame(
+                    state = mapsWin,
+                    isFocused = focusedWindow == mapsWin,
+                    screenWidthDp = screenW,
+                    screenHeightDp = screenH,
+                    onFocus = { bringToFront(mapsWin) },
+                    onClose = { mapsWin.isVisible.value = false }
+                ) {
+                    MapContent()
+                }
+
+                // Floating Window 5: Quick Notes
+                WindowFrame(
+                    state = notesWin,
+                    isFocused = focusedWindow == notesWin,
+                    screenWidthDp = screenW,
+                    screenHeightDp = screenH,
+                    onFocus = { bringToFront(notesWin) },
+                    onClose = { notesWin.isVisible.value = false }
+                ) {
+                    NotesContent()
+                }
+
+                // Floating Window 6: Storage Files
+                WindowFrame(
+                    state = filesWin,
+                    isFocused = focusedWindow == filesWin,
+                    screenWidthDp = screenW,
+                    screenHeightDp = screenH,
+                    onFocus = { bringToFront(filesWin) },
+                    onClose = { filesWin.isVisible.value = false }
+                ) {
+                    FilesContent()
+                }
+
+                // Floating Window 7: App Drawer
+                WindowFrame(
+                    state = appsWin,
+                    isFocused = focusedWindow == appsWin,
+                    screenWidthDp = screenW,
+                    screenHeightDp = screenH,
+                    onFocus = { bringToFront(appsWin) },
+                    onClose = { appsWin.isVisible.value = false }
+                ) {
+                    AppsDrawerContent(
+                        apps = installedApps,
+                        onLaunch = { app ->
+                            appsManager.launchApp(app.packageName)
+                            out("Launched ${app.label}", 3)
+                        }
+                    )
+                }
+
+                // Floating Window 8: Desktop System Settings
+                WindowFrame(
+                    state = settingsWin,
+                    isFocused = focusedWindow == settingsWin,
+                    screenWidthDp = screenW,
+                    screenHeightDp = screenH,
+                    onFocus = { bringToFront(settingsWin) },
+                    onClose = { settingsWin.isVisible.value = false }
+                ) {
+                    SystemSettingsContent(
+                        currentTheme = wallpaperTheme,
+                        onSelectTheme = { wallpaperTheme = it }
+                    )
+                }
+            }
+
+            // Bottom Quick Dock
+            QuickDock(
+                windows = windows,
+                activeWindow = focusedWindow,
+                onToggleWindow = { toggleWindow(it) },
+                modifier = Modifier.fillMaxWidth()
+            )
+
+            // Bottom Command Prompt Bar
+            CommandBar(
+                input = commandInput,
+                onInputChange = { commandInput = it },
+                onSubmit = { executeCommand(it) },
+                apps = installedApps,
+                modifier = Modifier.fillMaxWidth()
             )
         }
     }
