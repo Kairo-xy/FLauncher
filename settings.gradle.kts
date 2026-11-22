@@ -14,5 +14,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "Verya-Launcher"
+rootProject.name = "FLauncher"
 include(":app")
