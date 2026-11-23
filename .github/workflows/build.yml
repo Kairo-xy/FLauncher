@@ -54,7 +54,7 @@ jobs:
             echo "RELEASE_KEY_PASSWORD=$RELEASE_KEY_PASSWORD" >> "$GITHUB_ENV"
             echo "has_signing_key=true" >> "$GITHUB_OUTPUT"
           else
-            echo "::warning::Signing secrets not set. Building the debug APK only."
+            echo "::warning::Signing secrets not set. The release APK will be signed with the debug key."
             echo "has_signing_key=false" >> "$GITHUB_OUTPUT"
           fi
 
@@ -62,19 +62,19 @@ jobs:
         run: gradle assembleDebug --stacktrace
 
       - name: Build Release APK
-        if: steps.decode_keystore.outputs.has_signing_key == 'true'
         run: gradle assembleRelease --stacktrace
 
       - name: Verify Release APK Signature
-        if: steps.decode_keystore.outputs.has_signing_key == 'true'
         shell: bash
         run: |
           set -euo pipefail
-          RELEASE_APK="$(find app/build/outputs/apk/release -type f -name 'app-release.apk' | head -n 1)"
+          RELEASE_APK="$(find app/build/outputs/apk/release -type f -name '*.apk' | head -n 1)"
           if [[ -z "$RELEASE_APK" ]]; then
-            echo "::error::Signed release APK not found at app/build/outputs/apk/release/app-release.apk"
+            echo "::error::Release APK not found under app/build/outputs/apk/release"
+            ls -R app/build/outputs || true
             exit 1
           fi
+          echo "Found $RELEASE_APK"
           BUILD_TOOLS="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)"
           echo "Verifying signature with $BUILD_TOOLS/apksigner..."
           "$BUILD_TOOLS/apksigner" verify --verbose --print-certs "$RELEASE_APK"
@@ -86,9 +86,8 @@ jobs:
           set -euo pipefail
           mkdir -p dist
           cp app/build/outputs/apk/debug/app-debug.apk dist/FLauncher-debug.apk
-          if [[ -f app/build/outputs/apk/release/app-release.apk ]]; then
-            cp app/build/outputs/apk/release/app-release.apk dist/FLauncher-release.apk
-          fi
+          RELEASE_APK="$(find app/build/outputs/apk/release -type f -name '*.apk' | head -n 1)"
+          cp "$RELEASE_APK" dist/FLauncher-release.apk
 
       - name: Clean up Keystore
         if: always()
@@ -107,7 +106,6 @@ jobs:
           retention-days: 30
 
       - name: Upload Release APK Artifact
-        if: steps.decode_keystore.outputs.has_signing_key == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: FLauncher-release.apk
