@@ -35,6 +35,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -56,14 +57,26 @@ import com.verya.launcher.theme.CyberTypography
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
 fun BrowserContent(
-    initialUrl: String = "https://duckduckgo.com"
+    initialUrl: String = "https://duckduckgo.com",
+    navigateTo: String? = null,
+    navigateNonce: Int = 0
 ) {
     val context = LocalContext.current
-    var urlText by remember { mutableStateOf(initialUrl) }
+    val startUrl = navigateTo ?: initialUrl
+    var urlText by remember { mutableStateOf(startUrl) }
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
     var progress by remember { mutableIntStateOf(100) }
     var canGoBack by remember { mutableStateOf(false) }
     var canGoForward by remember { mutableStateOf(false) }
+
+    // Terminal commands (browser <url>, search <query>) navigate through this
+    LaunchedEffect(navigateNonce) {
+        val target = navigateTo
+        if (target != null) {
+            urlText = target
+            webViewRef?.loadUrl(target)
+        }
+    }
 
     val bookmarks = listOf(
         "DuckDuckGo" to "https://duckduckgo.com",
@@ -242,7 +255,7 @@ fun BrowserContent(
                         }
                     }
 
-                    loadUrl(initialUrl)
+                    loadUrl(startUrl)
                     webViewRef = this
                 }
             },
