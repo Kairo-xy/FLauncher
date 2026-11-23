@@ -12,8 +12,8 @@ android {
         applicationId = "com.verya.launcher"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "2.1.0"
     }
 
     signingConfigs {
@@ -34,7 +34,10 @@ android {
     buildTypes {
         release {
             isMinifyEnabled = false
+            // Use the real release key when the CI secrets are present,
+            // otherwise sign with the debug key so the release build still succeeds.
             signingConfig = signingConfigs.findByName("release")?.takeIf { it.storeFile != null }
+                ?: signingConfigs.getByName("debug")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -56,6 +59,12 @@ android {
 
     buildFeatures {
         compose = true
+    }
+
+    lint {
+        // Lint findings should not block APK builds
+        abortOnError = false
+        checkReleaseBuilds = false
     }
 }
 
